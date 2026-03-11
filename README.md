@@ -163,15 +163,15 @@ Example sections:
 
 ### Dashboard
 
-![Dashboard](screenshots/dashboard.png)
+![Dashboard](screenshots/Dashboardafteruploading.png)
 
 ### Prediction Chart
 
-![Prediction Chart](screenshots/prediction-chart.png)
+![Prediction Chart](screenshots/Prediction.png)
 
 ### Results Panel
 
-![Results](screenshots/results-panel.png)
+![Results](screenshots/chart.png)
 
 ---
 
