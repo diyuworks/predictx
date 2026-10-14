@@ -1,1 +1,17 @@
 node_modules
+build
+dist
+.env
+.env.local
+*.local
+.DS_Store
+.vscode/
+.idea/
+
+# Python / Django
+*.pyc
+__pycache__/
+backend/venv/
+backend/.venv/
+backend/.env
+backend/db.sqlite3
