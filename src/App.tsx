@@ -1,601 +1,612 @@
-import { useState } from "react";
-import { BrowserRouter, Routes, Route, useNavigate } from "react-router-dom";
-import CarDashboard from "./pages/CarDashboard";
-
-import { Button } from "./components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "./components/ui/card";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "./components/ui/select";
-import { Input } from "./components/ui/input";
-import { Label } from "./components/ui/label";
+import { useState, useEffect, useId } from 'react';
+import { BrowserRouter, Routes, Route, useNavigate } from 'react-router-dom';
+import CarDashboard from './pages/CarDashboard';
+import { Button } from './components/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './components/ui/select';
+import { Input } from './components/ui/input';
+import { Label } from './components/ui/label';
 import {
   Upload,
   TrendingUp,
   Brain,
-  FileText,
-  BarChart3,
-  CheckCircle2,
-} from "lucide-react";
+  FileSpreadsheet,
+  Download,
+  PieChart as PieIcon,
+  CheckCircle,
+  AlertCircle,
+  Sparkles,
+  BarChart2,
+  RefreshCw,
+  Info,
+} from 'lucide-react';
 import {
-  BarChart,
-  Bar,
+  ResponsiveContainer,
+  ComposedChart,
+  Line,
+  Area,
   XAxis,
   YAxis,
   CartesianGrid,
   Tooltip,
-  ResponsiveContainer,
   Legend,
-} from "recharts";
+} from 'recharts';
+import {
+  SalesRow,
+  ChartPoint,
+  ModelType,
+  ModelEvaluation,
+  ModelMetrics,
+  runForecastingEngine,
+} from './lib/ml';
+import { SAMPLE_DATASETS } from './lib/sampleDatasets';
+import { parseSalesCsv, aggregateByDate } from './lib/csvParser';
+import { exportForecastCsv, exportElementAsPng } from './lib/exportUtils';
 
-type SalesRow = {
-  date: string;
-  sales: number;
-  brand?: string; // used for dashboard pie chart
-};
-
-type ChartPoint = {
-  date: string;
-  actual?: number;
-  predicted?: number;
-};
-
-/**
- * Main UI of your app (existing screen)
- */
-function MainApp() {
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [model, setModel] = useState("linear-regression"); // fixed to LR
-  const [futureDays, setFutureDays] = useState("30");
-  const [hasResults, setHasResults] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
-
-  const [salesData, setSalesData] = useState<SalesRow[]>([]);
-  const [chartData, setChartData] = useState<ChartPoint[]>([]);
-  const [mae, setMae] = useState<number | null>(null);
-  const [accuracy, setAccuracy] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
+function MainForecastingView() {
   const navigate = useNavigate();
+  const chartContainerId = useId().replace(/:/g, '') || 'forecast-chart-panel';
 
-  // --- CSV parsing helper ---
-  const parseCsv = (text: string): SalesRow[] => {
-    const lines = text.trim().split(/\r?\n/);
-    if (lines.length < 2) {
-      throw new Error("CSV must have a header and at least one data row.");
-    }
+  // State
+  const [salesData, setSalesData] = useState<SalesRow[]>(SAMPLE_DATASETS[0].rows);
+  const [dataOrigin, setDataOrigin] = useState<string>('Car Sales Demo (Automotive)');
+  const [selectedModel, setSelectedModel] = useState<ModelType | 'auto'>('auto');
+  const [futureDays, setFutureDays] = useState<number>(30);
+  const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
 
-    const headerLine = lines[0];
-    const headers = headerLine.split(",").map((h) => h.trim().toLowerCase());
+  // Model Results State
+  const [chartData, setChartData] = useState<ChartPoint[]>([]);
+  const [evaluations, setEvaluations] = useState<ModelEvaluation[]>([]);
+  const [bestModelType, setBestModelType] = useState<ModelType>('linear');
+  const [activeMetrics, setActiveMetrics] = useState<ModelMetrics | null>(null);
 
-    const dateIdx = headers.findIndex((h) => h === "date");
-    const salesIdx = headers.findIndex((h) => h === "sales");
-    const brandIdx = headers.findIndex((h) => h === "brand"); // optional
-
-    if (dateIdx === -1 || salesIdx === -1) {
-      throw new Error("CSV must have 'date' and 'sales' columns.");
-    }
-
-    const rows = lines.slice(1);
-    const data: SalesRow[] = [];
-
-    for (const line of rows) {
-      if (!line.trim()) continue;
-      const cols = line.split(",");
-      if (cols.length <= Math.max(dateIdx, salesIdx)) continue;
-
-      const date = cols[dateIdx].trim();
-      const sales = Number(cols[salesIdx]);
-      const brand =
-        brandIdx !== -1 && cols.length > brandIdx
-          ? cols[brandIdx].trim() || undefined
-          : undefined;
-
-      if (!date || isNaN(sales)) continue;
-
-      data.push({ date, sales, brand });
-    }
-
-    if (data.length < 3) {
-      throw new Error("Need at least 3 valid rows of data.");
-    }
-
-    // Sort by date so our time index is in order
-    data.sort(
-      (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
-    );
-
-    return data;
-  };
-
-  // --- Linear regression helper ---
-  const fitLinearRegression = (data: SalesRow[]) => {
-    const n = data.length;
-    const xs = data.map((_, i) => i + 1); // 1..n
-    const ys = data.map((d) => d.sales);
-
-    const meanX = xs.reduce((sum, x) => sum + x, 0) / n;
-    const meanY = ys.reduce((sum, y) => sum + y, 0) / n;
-
-    let num = 0;
-    let den = 0;
-
-    for (let i = 0; i < n; i++) {
-      const dx = xs[i] - meanX;
-      const dy = ys[i] - meanY;
-      num += dx * dy;
-      den += dx * dx;
-    }
-
-    const slope = den === 0 ? 0 : num / den;
-    const intercept = meanY - slope * meanX;
-
-    return { slope, intercept };
-  };
-
-  // --- Build chart data + MAE + Accuracy ---
-  const buildChartDataAndMetrics = (
-    data: SalesRow[],
-    slope: number,
-    intercept: number,
-    future: number
-  ) => {
-    const n = data.length;
-    const points: ChartPoint[] = [];
-
-    // Historical part (actual + model's predicted)
-    for (let i = 0; i < n; i++) {
-      const t = i + 1;
-      const predicted = intercept + slope * t;
-      points.push({
-        date: data[i].date,
-        actual: data[i].sales,
-        predicted,
-      });
-    }
-
-    // Forecast future days (only predicted)
-    const lastDate = new Date(data[n - 1].date);
-    for (let i = 1; i <= future; i++) {
-      const t = n + i;
-      const predicted = intercept + slope * t;
-      const futureDate = new Date(lastDate);
-      futureDate.setDate(lastDate.getDate() + i);
-      points.push({
-        date: futureDate.toISOString().slice(0, 10),
-        predicted,
-      });
-    }
-
-    // Simple test MAE on last 20% of history
-    const startTest = Math.floor(n * 0.8);
-    let errorSum = 0;
-    let count = 0;
-
-    for (let i = startTest; i < n; i++) {
-      const t = i + 1;
-      const pred = intercept + slope * t;
-      const actual = data[i].sales;
-      errorSum += Math.abs(pred - actual);
-      count++;
-    }
-
-    const mae = count > 0 ? errorSum / count : null;
-
-    // Accuracy (%) based on MAE vs average actual in test set
-    let accuracy: number | null = null;
-    if (mae !== null && count > 0) {
-      const testData = data.slice(startTest);
-      const avgActual =
-        testData.reduce((sum, d) => sum + d.sales, 0) / testData.length;
-      if (avgActual !== 0) {
-        accuracy = Math.max(0, 100 - (mae / avgActual) * 100);
-      }
-    }
-
-    return { points, mae, accuracy };
-  };
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setError(null);
-    setHasResults(false);
-    setMae(null);
-    setAccuracy(null);
-    setChartData([]);
-
-    if (!e.target.files || !e.target.files[0]) {
-      setSelectedFile(null);
-      setSalesData([]);
+  // Run Forecast function
+  const executeForecast = (dataToForecast = salesData, modelChoice = selectedModel, horizon = futureDays) => {
+    if (!dataToForecast || dataToForecast.length < 3) {
+      setError('Dataset must contain at least 3 rows to generate a forecast.');
       return;
     }
-
-    const file = e.target.files[0];
-    setSelectedFile(file);
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const text = reader.result as string;
-        const parsed = parseCsv(text);
-        setSalesData(parsed);
-      } catch (err) {
-        console.error(err);
-        setError(err instanceof Error ? err.message : "Failed to parse CSV.");
-        setSalesData([]);
-      }
-    };
-    reader.onerror = () => {
-      setError("Failed to read the file.");
-    };
-    reader.readAsText(file);
-  };
-
-  const handlePredict = () => {
-    setError(null);
-
-    if (!salesData.length) {
-      setError("Please upload a valid CSV first.");
-      return;
-    }
-
-    const future = Math.min(Math.max(Number(futureDays) || 0, 1), 365);
 
     setIsProcessing(true);
+    setError(null);
+
     try {
-      const { slope, intercept } = fitLinearRegression(salesData);
-      const { points, mae, accuracy } = buildChartDataAndMetrics(
-        salesData,
-        slope,
-        intercept,
-        future
-      );
-      setChartData(points);
-      setMae(mae);
-      setAccuracy(accuracy);
-      setHasResults(true);
+      const result = runForecastingEngine(aggregateByDate(dataToForecast), modelChoice, horizon);
+      setChartData(result.chartData);
+      setEvaluations(result.evaluations);
+      setBestModelType(result.bestModelType);
+      setActiveMetrics(result.selectedMetrics);
     } catch (err) {
-      console.error(err);
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Failed to generate predictions."
-      );
-      setHasResults(false);
+      setError(err instanceof Error ? err.message : 'Error computing forecast.');
     } finally {
       setIsProcessing(false);
     }
   };
 
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900">
-      {/* Header */}
-      <header className="border-b border-slate-700/50 bg-slate-900/50 backdrop-blur-sm sticky top-0 z-10">
-        <div className="container mx-auto px-6 py-4">
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div className="p-2 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg">
-                <Brain className="size-6 text-white" />
-              </div>
-              <div>
-                <h1 className="text-white text-xl font-bold">🚀 PredictX</h1>
-                <p className="text-slate-400 text-sm">
-                   AI-Powered Sales Forecasting Dashboard
-                </p>
-              </div>
-            </div>
+  // Initial load
+  useEffect(() => {
+    executeForecast(SAMPLE_DATASETS[0].rows, 'auto', 30);
+  }, []);
 
-            {/* 🔗 Button to open animated dashboard with uploaded CSV */}
+  // Handle CSV file upload
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setError(null);
+    if (!e.target.files || !e.target.files[0]) return;
+
+    const file = e.target.files[0];
+    const reader = new FileReader();
+
+    reader.onload = () => {
+      try {
+        const parsed = parseSalesCsv(reader.result as string);
+        setSalesData(parsed);
+        setDataOrigin(file.name);
+        executeForecast(parsed, selectedModel, futureDays);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Invalid CSV file format.');
+      }
+    };
+
+    reader.onerror = () => {
+      setError('Failed to read uploaded file.');
+    };
+
+    reader.readAsText(file);
+  };
+
+  // Handle Demo dataset selection
+  const handleSelectSample = (sampleId: string) => {
+    const sample = SAMPLE_DATASETS.find((s) => s.id === sampleId);
+    if (!sample) return;
+
+    setSalesData(sample.rows);
+    setDataOrigin(sample.name);
+    executeForecast(sample.rows, selectedModel, futureDays);
+  };
+
+  // Re-run on parameter changes
+  const handleModelChange = (val: string) => {
+    const newModel = val as ModelType | 'auto';
+    setSelectedModel(newModel);
+    executeForecast(salesData, newModel, futureDays);
+  };
+
+  const handleHorizonChange = (val: number) => {
+    const safeHorizon = Math.max(1, Math.min(365, val));
+    setFutureDays(safeHorizon);
+    executeForecast(salesData, selectedModel, safeHorizon);
+  };
+
+  // Total forecast calculation
+  const futurePoints = chartData.filter((d) => d.actual === undefined && d.predicted !== undefined);
+  const totalForecastedUnits = Math.round(futurePoints.reduce((acc, p) => acc + (p.predicted || 0), 0));
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 antialiased selection:bg-indigo-500 selection:text-white">
+      {/* Top Header */}
+      <header className="border-b border-slate-800 bg-slate-900/60 backdrop-blur-md sticky top-0 z-40">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+            <div className="h-9 w-9 rounded-lg bg-gradient-to-tr from-indigo-600 to-emerald-500 flex items-center justify-center shadow-lg shadow-indigo-500/20">
+              <TrendingUp className="h-5 w-5 text-white" />
+            </div>
+            <div>
+              <div className="flex items-center space-x-2">
+                <span className="font-bold text-lg tracking-tight text-white">PredictX</span>
+                <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 font-medium">
+                  v2.0
+                </span>
+              </div>
+              <p className="text-xs text-slate-400">AI Sales Forecasting & Predictive Analytics</p>
+            </div>
+          </div>
+
+          <div className="flex items-center space-x-3">
             <Button
-              onClick={() => navigate("/dashboard", { state: { salesData } })}
-              className="bg-purple-600 hover:bg-purple-700 text-white rounded-xl"
-              disabled={salesData.length === 0}
+              variant="outline"
+              size="sm"
+              onClick={() => navigate('/dashboard', { state: { salesData } })}
+              className="bg-slate-800/80 border-slate-700 hover:bg-slate-700 text-slate-200 text-xs font-medium flex items-center space-x-2"
             >
-              📈 Open Sales Dashboard
+              <PieIcon className="h-4 w-4 text-emerald-400" />
+              <span>Brand Analytics</span>
+              <span className="ml-1 px-1.5 py-0.2 rounded bg-slate-700 text-[10px] text-slate-300">
+                {salesData.length} records
+              </span>
             </Button>
           </div>
         </div>
       </header>
 
       {/* Main Content */}
-      <main className="container mx-auto px-6 py-8">
-        <div className="grid lg:grid-cols-5 gap-6">
-          {/* Left Panel - Upload & Configuration */}
-          <div className="lg:col-span-2 space-y-6">
-            {/* Upload Card */}
-            <Card className="border-slate-700 bg-slate-800/50 backdrop-blur-sm">
-              <CardHeader>
-                <div className="flex items-center gap-2">
-                  <div className="p-2 bg-blue-500/10 rounded-lg">
-                    <Upload className="size-5 text-blue-400" />
-                  </div>
-                  <div>
-                    <CardTitle className="text-white">Upload CSV</CardTitle>
-                    <CardDescription>
-                      CSV with <code>date</code>, <code>sales</code> and optional{" "}
-                      <code>brand</code> columns
-                    </CardDescription>
-                  </div>
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="space-y-2">
-                  <Label htmlFor="file-upload" className="text-slate-300">
-                    Data File
-                  </Label>
-                  <div className="relative">
-                    <Input
-                      id="file-upload"
-                      type="file"
-                      accept=".csv"
-                      onChange={handleFileChange}
-                      className="bg-slate-900/50 border-slate-600 text-slate-300 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-blue-500/10 file:text-blue-400 hover:file:bg-blue-500/20 cursor-pointer"
-                    />
-                  </div>
-                  {selectedFile && (
-                    <div className="flex items-center gap-2 text-sm text-green-400 mt-2">
-                      <CheckCircle2 className="size-4" />
-                      <span>{selectedFile.name}</span>
-                    </div>
-                  )}
-                  {error && (
-                    <p className="text-sm text-red-400 mt-2">{error}</p>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+        {/* Error Alert */}
+        {error && (
+          <div className="p-4 rounded-xl bg-red-950/50 border border-red-800/50 flex items-start space-x-3 text-red-200">
+            <AlertCircle className="h-5 w-5 text-red-400 flex-shrink-0 mt-0.5" />
+            <div className="text-sm">
+              <strong className="font-semibold">Dataset Error: </strong>
+              <span>{error}</span>
+            </div>
+          </div>
+        )}
 
-            {/* Model Configuration Card */}
-            <Card className="border-slate-700 bg-slate-800/50 backdrop-blur-sm">
-              <CardHeader>
-                <div className="flex items-center gap-2">
-                  <div className="p-2 bg-purple-500/10 rounded-lg">
-                    <Brain className="size-5 text-purple-400" />
+        {/* Configuration Section: Ingestion & Parameters */}
+        <section className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          {/* Data Ingestion Card */}
+          <Card className="lg:col-span-6 bg-slate-900/50 border-slate-800 shadow-xl">
+            <CardHeader className="pb-3">
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-sm font-semibold uppercase tracking-wider text-slate-300 flex items-center space-x-2">
+                  <FileSpreadsheet className="h-4 w-4 text-indigo-400" />
+                  <span>Data Ingestion</span>
+                </CardTitle>
+                <span className="text-xs text-slate-400 truncate max-w-[200px]" title={dataOrigin}>
+                  Active: {dataOrigin}
+                </span>
+              </div>
+              <CardDescription className="text-xs text-slate-400">
+                Upload historical sales CSV or load a preconfigured demo dataset.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {/* File Upload Box */}
+                <div className="relative border border-dashed border-slate-700 hover:border-indigo-500 transition-colors rounded-lg p-4 text-center bg-slate-950/40 cursor-pointer">
+                  <input
+                    type="file"
+                    accept=".csv"
+                    onChange={handleFileUpload}
+                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                  />
+                  <Upload className="h-6 w-6 text-slate-400 mx-auto mb-1" />
+                  <span className="text-xs font-medium text-slate-300 block">Upload CSV</span>
+                  <span className="text-[10px] text-slate-500">Headers: date, sales, brand</span>
+                </div>
+
+                {/* Preconfigured Demo Datasets */}
+                <div className="border border-slate-800 rounded-lg p-3 bg-slate-950/40 flex flex-col justify-between">
+                  <div className="text-xs font-medium text-slate-300 mb-2 flex items-center space-x-1.5">
+                    <Sparkles className="h-3.5 w-3.5 text-emerald-400" />
+                    <span>Try Sample Dataset</span>
                   </div>
-                  <div>
-                    <CardTitle className="text-white">
-                      Model Configuration
-                    </CardTitle>
-                    <CardDescription>
-                      Linear Regression time trend
-                    </CardDescription>
+                  <div className="space-y-1.5">
+                    {SAMPLE_DATASETS.map((sample) => (
+                      <button
+                        key={sample.id}
+                        onClick={() => handleSelectSample(sample.id)}
+                        className={`w-full text-left px-2.5 py-1.5 rounded text-xs transition-colors truncate ${
+                          dataOrigin === sample.name
+                            ? 'bg-indigo-600/30 border border-indigo-500/40 text-indigo-200'
+                            : 'hover:bg-slate-800 text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        {sample.name}
+                      </button>
+                    ))}
                   </div>
                 </div>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="space-y-2">
-                  <Label htmlFor="model" className="text-slate-300">
-                    Model
-                  </Label>
-                  {/* Locked to Linear Regression for now */}
-                  <Select value={model} onValueChange={setModel} disabled>
-                    <SelectTrigger
-                      id="model"
-                      className="bg-slate-900/50 border-slate-600 text-slate-300"
-                    >
-                      <SelectValue />
+              </div>
+
+              <div className="flex items-center justify-between text-[11px] text-slate-400 pt-1 border-t border-slate-800/80">
+                <span className="flex items-center space-x-1">
+                  <CheckCircle className="h-3.5 w-3.5 text-emerald-400" />
+                  <span>{salesData.length} records parsed</span>
+                </span>
+                <span>Date range: {salesData[0]?.date} to {salesData[salesData.length - 1]?.date}</span>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Model & Horizon Parameters Card */}
+          <Card className="lg:col-span-6 bg-slate-900/50 border-slate-800 shadow-xl">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-semibold uppercase tracking-wider text-slate-300 flex items-center space-x-2">
+                <Brain className="h-4 w-4 text-emerald-400" />
+                <span>Model & Forecast Horizon</span>
+              </CardTitle>
+              <CardDescription className="text-xs text-slate-400">
+                Select algorithm architecture and specify future projection horizon.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {/* Algorithm Selection */}
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-slate-300">Forecasting Algorithm</Label>
+                  <Select value={selectedModel} onValueChange={handleModelChange}>
+                    <SelectTrigger className="bg-slate-950/60 border-slate-700 text-xs text-slate-200">
+                      <SelectValue placeholder="Select Algorithm" />
                     </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="linear-regression">
-                        Linear Regression
-                      </SelectItem>
+                    <SelectContent className="bg-slate-900 border-slate-700 text-slate-200 text-xs">
+                      <SelectItem value="auto">Auto (Select Optimal Model)</SelectItem>
+                      <SelectItem value="linear">Linear Regression (Trend)</SelectItem>
+                      <SelectItem value="exponential">Holt's Exponential Smoothing</SelectItem>
+                      <SelectItem value="moving_avg">Moving Average (Momentum)</SelectItem>
+                      <SelectItem value="polynomial">Polynomial Regression (Degree 2)</SelectItem>
                     </SelectContent>
                   </Select>
-                  <p className="text-xs text-slate-500">
-                    Prototype uses a simple linear trend model on the client
-                    side.
-                  </p>
                 </div>
 
-                <div className="space-y-2">
-                  <Label htmlFor="days" className="text-slate-300">
-                    Predict Future Days
-                  </Label>
-                  <Input
-                    id="days"
-                    type="number"
-                    value={futureDays}
-                    onChange={(e) => setFutureDays(e.target.value)}
-                    min="1"
-                    max="365"
-                    className="bg-slate-900/50 border-slate-600 text-slate-300"
-                  />
+                {/* Horizon Selection */}
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-slate-300">Forecast Horizon (Days Ahead)</Label>
+                  <div className="flex items-center space-x-2">
+                    <Input
+                      type="number"
+                      min={1}
+                      max={365}
+                      value={futureDays}
+                      onChange={(e) => handleHorizonChange(Number(e.target.value))}
+                      className="bg-slate-950/60 border-slate-700 text-xs text-slate-200"
+                    />
+                    <div className="flex space-x-1">
+                      {[14, 30, 60, 90].map((d) => (
+                        <button
+                          key={d}
+                          type="button"
+                          onClick={() => handleHorizonChange(d)}
+                          className={`px-2 py-1 rounded text-[11px] font-medium border ${
+                            futureDays === d
+                              ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+                              : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700'
+                          }`}
+                        >
+                          {d}d
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 </div>
+              </div>
 
+              <div className="flex items-center justify-between text-xs pt-2">
+                <span className="text-slate-400 flex items-center space-x-1">
+                  <Info className="h-3.5 w-3.5 text-slate-500" />
+                  <span>
+                    Active Model:{' '}
+                    <strong className="text-slate-200">
+                      {selectedModel === 'auto' ? `Auto (${bestModelType})` : selectedModel}
+                    </strong>
+                  </span>
+                </span>
                 <Button
-                  onClick={handlePredict}
-                  disabled={!salesData.length || isProcessing}
-                  className="w-full bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white"
+                  size="sm"
+                  onClick={() => executeForecast(salesData, selectedModel, futureDays)}
+                  disabled={isProcessing}
+                  className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs h-8 px-3"
                 >
-                  {isProcessing ? (
-                    <>Processing...</>
-                  ) : (
-                    <>
-                      <TrendingUp className="size-4 mr-2" />
-                      Generate Forecast
-                    </>
-                  )}
+                  <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${isProcessing ? 'animate-spin' : ''}`} />
+                  Recalculate
                 </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </section>
+
+        {/* Executive Metrics Overview */}
+        {activeMetrics && (
+          <section className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+            <Card className="bg-slate-900/40 border-slate-800">
+              <CardContent className="p-4">
+                <div className="text-[11px] uppercase tracking-wider text-slate-400 font-medium">Model Accuracy</div>
+                <div className="text-2xl font-bold text-emerald-400 mt-1">{activeMetrics.accuracy}%</div>
+                <div className="text-[10px] text-slate-500 mt-0.5">Based on 100 - MAPE</div>
               </CardContent>
             </Card>
 
-            {/* Info Card */}
-            <Card className="border-slate-700 bg-gradient-to-br from-blue-500/10 to-purple-500/10 backdrop-blur-sm">
-              <CardContent className="pt-6">
-                <div className="flex gap-3">
-                  <FileText className="size-5 text-blue-400 flex-shrink-0 mt-0.5" />
-                  <div className="text-sm text-slate-300">
-                    <p>
-                      Upload a CSV file containing your historical sales data.
-                      The app will fit a simple linear trend and forecast future
-                      sales.
-                    </p>
-                    <p className="text-slate-400 mt-2 text-xs">
-                      Example header:{" "}
-                      <code>date,sales,brand</code> with dates like{" "}
-                      <code>2024-01-01</code>.
-                    </p>
-                  </div>
-                </div>
+            <Card className="bg-slate-900/40 border-slate-800">
+              <CardContent className="p-4">
+                <div className="text-[11px] uppercase tracking-wider text-slate-400 font-medium">Mean Abs Error (MAE)</div>
+                <div className="text-2xl font-bold text-slate-100 mt-1">{activeMetrics.mae}</div>
+                <div className="text-[10px] text-slate-500 mt-0.5">Average unit variance</div>
               </CardContent>
             </Card>
 
-            {/* 🔍 Car Sales Data Button + Modal (inside left panel) */}
-            
+            <Card className="bg-slate-900/40 border-slate-800">
+              <CardContent className="p-4">
+                <div className="text-[11px] uppercase tracking-wider text-slate-400 font-medium">Root Mean Sq Err (RMSE)</div>
+                <div className="text-2xl font-bold text-slate-100 mt-1">{activeMetrics.rmse}</div>
+                <div className="text-[10px] text-slate-500 mt-0.5">Penalizes large outliers</div>
+              </CardContent>
+            </Card>
+
+            <Card className="bg-slate-900/40 border-slate-800">
+              <CardContent className="p-4">
+                <div className="text-[11px] uppercase tracking-wider text-slate-400 font-medium">Goodness of Fit (R²)</div>
+                <div className="text-2xl font-bold text-indigo-400 mt-1">{activeMetrics.r2}</div>
+                <div className="text-[10px] text-slate-500 mt-0.5">Variance explained</div>
+              </CardContent>
+            </Card>
+
+            <Card className="bg-slate-900/40 border-slate-800">
+              <CardContent className="p-4">
+                <div className="text-[11px] uppercase tracking-wider text-slate-400 font-medium">Forecast Horizon</div>
+                <div className="text-2xl font-bold text-amber-400 mt-1">+{futureDays} Days</div>
+                <div className="text-[10px] text-slate-500 mt-0.5">Out-of-sample projection</div>
+              </CardContent>
+            </Card>
+
+            <Card className="bg-slate-900/40 border-slate-800">
+              <CardContent className="p-4">
+                <div className="text-[11px] uppercase tracking-wider text-slate-400 font-medium">Projected Units</div>
+                <div className="text-2xl font-bold text-purple-400 mt-1">{totalForecastedUnits.toLocaleString()}</div>
+                <div className="text-[10px] text-slate-500 mt-0.5">Cumulative expected sales</div>
+              </CardContent>
+            </Card>
+          </section>
+        )}
+
+        {/* Primary Forecast Chart Section */}
+        <section id={chartContainerId} className="bg-slate-900/60 border border-slate-800 rounded-xl p-6 shadow-2xl">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-6 border-b border-slate-800/80">
+            <div>
+              <h2 className="text-lg font-semibold text-white tracking-tight flex items-center space-x-2">
+                <BarChart2 className="h-5 w-5 text-indigo-400" />
+                <span>Historical Sales & Predictive Trajectory</span>
+              </h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Blue indicates observed actual sales. Emerald represents model predictions with a shaded approximate 95% prediction band.
+              </p>
+            </div>
+
+            <div className="flex items-center space-x-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => exportForecastCsv(chartData)}
+                className="bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-200 text-xs h-8"
+              >
+                <Download className="h-3.5 w-3.5 mr-1 text-slate-400" />
+                Export CSV
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => exportElementAsPng(chartContainerId, 'predictx_forecast_chart.png')}
+                className="bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-200 text-xs h-8"
+              >
+                <Download className="h-3.5 w-3.5 mr-1 text-slate-400" />
+                Export PNG
+              </Button>
+            </div>
           </div>
 
-          {/* Right Panel - Results */}
-          <div className="lg:col-span-3">
-            <Card className="border-slate-700 bg-slate-800/50 backdrop-blur-sm h-full">
-              <CardHeader>
-                <div className="flex items-center gap-2">
-                  <div className="p-2 bg-green-500/10 rounded-lg">
-                    <BarChart3 className="size-5 text-green-400" />
-                  </div>
-                  <div>
-                    <CardTitle className="text-white">Results</CardTitle>
-                    <CardDescription>
-                      Prediction analysis and visualization
-                    </CardDescription>
-                  </div>
-                </div>
-              </CardHeader>
-              <CardContent>
-                {!hasResults ? (
-                  <div className="flex flex-col items-center justify-center py-16 text-center">
-                    <div className="p-4 bg-slate-700/30 rounded-full mb-4">
-                      <TrendingUp className="size-12 text-slate-500" />
-                    </div>
-                    <p className="text-slate-400">
-                      Upload a CSV file and click Generate Forecast to see
-                      results
-                    </p>
-                    <p className="text-slate-500 text-sm mt-2">
-                      Your predictions will appear here
-                    </p>
-                  </div>
-                ) : (
-                  <div className="space-y-6">
-                    {/* Stats Grid */}
-                    <div className="grid grid-cols-4 gap-4">
-                      <div className="bg-slate-900/50 rounded-lg p-4 border border-slate-700">
-                        <p className="text-slate-400 text-sm">
-                          Error (MAE)
-                        </p>
-                        <p className="text-white mt-1">
-                          {mae !== null ? mae.toFixed(2) : "N/A"}
-                        </p>
-                      </div>
-                      <div className="bg-slate-900/50 rounded-lg p-4 border border-slate-700">
-                        <p className="text-slate-400 text-sm">
-                          Accuracy
-                        </p>
-                        <p className="text-white mt-1">
-                          {accuracy !== null
-                            ? `${accuracy.toFixed(2)}%`
-                            : "N/A"}
-                        </p>
-                      </div>
-                      <div className="bg-slate-900/50 rounded-lg p-4 border border-slate-700">
-                        <p className="text-slate-400 text-sm">Model</p>
-                        <p className="text-white mt-1">
-                          Linear Regression
-                        </p>
-                      </div>
-                      <div className="bg-slate-900/50 rounded-lg p-4 border border-slate-700">
-                        <p className="text-slate-400 text-sm">
-                          Future Days
-                        </p>
-                        <p className="text-white mt-1">{futureDays}</p>
-                      </div>
-                    </div>
+          <div className="h-[420px] w-full pt-6">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={chartData} margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
+                <defs>
+                  <linearGradient id="confidenceArea" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#10b981" stopOpacity={0.25} />
+                    <stop offset="95%" stopColor="#10b981" stopOpacity={0.02} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" opacity={0.5} />
+                <XAxis
+                  dataKey="date"
+                  stroke="#94a3b8"
+                  fontSize={11}
+                  tickLine={false}
+                  dy={10}
+                  tickFormatter={(val) => (val ? val.slice(5) : '')}
+                />
+                <YAxis
+                  stroke="#94a3b8"
+                  fontSize={11}
+                  tickLine={false}
+                  dx={-5}
+                  tickFormatter={(val) => Number(val).toLocaleString()}
+                />
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: '#0f172a',
+                    borderColor: '#334155',
+                    borderRadius: '8px',
+                    fontSize: '12px',
+                    color: '#f8fafc',
+                  }}
+                  formatter={(value: any, name: string) => {
+                    if (value === undefined || value === null) return ['-', name];
+                    if (name === 'upperBound') return [`${value} units`, 'Upper Bound (approx. 95%)'];
+                    if (name === 'lowerBound') return [`${value} units`, 'Lower Bound (approx. 95%)'];
+                    if (name === 'predicted') return [`${value} units`, 'Model Forecast'];
+                    if (name === 'actual') return [`${value} units`, 'Actual Sales'];
+                    return [value, name];
+                  }}
+                  labelFormatter={(label) => `Date: ${label}`}
+                />
+                <Legend
+                  verticalAlign="top"
+                  height={36}
+                  wrapperStyle={{ fontSize: '12px', color: '#cbd5e1' }}
+                />
 
-                    {/* Chart */}
-                    <div className="bg-slate-900/50 rounded-lg p-4 border border-slate-700">
-                      <h3 className="text-white mb-4">
-                        Sales Prediction Forecast
-                      </h3>
-                      <ResponsiveContainer width="100%" height={320}>
-                        <BarChart data={chartData}>
-                          <CartesianGrid
-                            strokeDasharray="3 3"
-                            stroke="#334155"
-                          />
-                          <XAxis dataKey="date" stroke="#94a3b8" />
-                          <YAxis stroke="#94a3b8" />
-                          <Tooltip
-                            contentStyle={{
-                              backgroundColor: "#1e293b",
-                              border: "1px solid #334155",
-                              borderRadius: "8px",
-                            }}
-                          />
-                          <Legend />
-                          <Bar
-                            dataKey="actual"
-                            fill="#8b5cf6"
-                            name="Actual"
-                            barSize={20}
-                          />
-                          <Bar
-                            dataKey="predicted"
-                            fill="#3b82f6"
-                            name="Predicted"
-                            barSize={20}
-                          />
-                        </BarChart>
-                      </ResponsiveContainer>
-                    </div>
+                {/* Shaded Approximate 95% Prediction Band for Future Projections */}
+                <Area
+                  type="monotone"
+                  dataKey="upperBound"
+                  stroke="none"
+                  fill="url(#confidenceArea)"
+                  name="Approx. 95% Prediction Band"
+                  isAnimationActive={false}
+                />
 
-                    {/* Insights */}
-                    <div className="bg-gradient-to-br from-green-500/10 to-emerald-500/10 rounded-lg p-4 border border-green-500/20">
-                      <div className="flex gap-3">
-                        <CheckCircle2 className="size-5 text-green-400 flex-shrink-0 mt-0.5" />
-                        <div>
-                          <p className="text-green-400 mb-1">
-                            Prediction Complete
-                          </p>
-                          <p className="text-slate-300 text-sm">
-                            Based on your historical data, a linear trend model
-                            has been fitted and used to forecast the next{" "}
-                            {futureDays} days of sales. Actual and predicted
-                            values are shown as grouped bars for easy
-                            comparison, with MAE and an approximate accuracy
-                            percentage summarizing model performance on recent
-                            data.
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
+                {/* Actual Sales Line */}
+                <Line
+                  type="monotone"
+                  dataKey="actual"
+                  name="Actual Sales"
+                  stroke="#38bdf8"
+                  strokeWidth={2.5}
+                  dot={{ r: 3, fill: '#38bdf8' }}
+                  activeDot={{ r: 6 }}
+                />
+
+                {/* Predicted / Forecast Line */}
+                <Line
+                  type="monotone"
+                  dataKey="predicted"
+                  name="Forecasted Trend"
+                  stroke="#10b981"
+                  strokeWidth={2.5}
+                  strokeDasharray="4 4"
+                  dot={{ r: 2.5, fill: '#10b981' }}
+                  activeDot={{ r: 5 }}
+                />
+              </ComposedChart>
+            </ResponsiveContainer>
           </div>
-        </div>
+        </section>
+
+        {/* Model Evaluation & Leaderboard */}
+        <section className="bg-slate-900/50 border border-slate-800 rounded-xl p-6 shadow-xl space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-base font-semibold text-white">Algorithm Benchmark & Leaderboard</h3>
+              <p className="text-xs text-slate-400">
+                Performance evaluated on out-of-sample test split (20% holdout). Lower MAE and RMSE indicate higher accuracy.
+              </p>
+            </div>
+            <span className="text-xs px-2.5 py-1 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-medium">
+              Optimal Model: {bestModelType}
+            </span>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-slate-800/60 text-slate-300 uppercase tracking-wider text-[10px]">
+                <tr>
+                  <th className="py-2.5 px-4 rounded-l">Model Architecture</th>
+                  <th className="py-2.5 px-3">Description</th>
+                  <th className="py-2.5 px-3">MAE</th>
+                  <th className="py-2.5 px-3">RMSE</th>
+                  <th className="py-2.5 px-3">MAPE</th>
+                  <th className="py-2.5 px-3">R² Score</th>
+                  <th className="py-2.5 px-4 rounded-r text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/60 text-slate-300">
+                {evaluations.map((ev) => {
+                  const isActive =
+                    selectedModel === ev.modelType ||
+                    (selectedModel === 'auto' && ev.modelType === bestModelType);
+
+                  return (
+                    <tr
+                      key={ev.modelType}
+                      className={`hover:bg-slate-800/40 transition-colors ${
+                        isActive ? 'bg-indigo-950/20 text-white font-medium' : ''
+                      }`}
+                    >
+                      <td className="py-3 px-4 flex items-center space-x-2">
+                        <span>{ev.name}</span>
+                        {ev.isBest && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                            Optimal
+                          </span>
+                        )}
+                        {isActive && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                            Active
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-3 px-3 text-slate-400 max-w-xs">{ev.description}</td>
+                      <td className="py-3 px-3 font-mono">{ev.metrics.mae}</td>
+                      <td className="py-3 px-3 font-mono">{ev.metrics.rmse}</td>
+                      <td className="py-3 px-3 font-mono">{ev.metrics.mape}%</td>
+                      <td className="py-3 px-3 font-mono text-indigo-400">{ev.metrics.r2}</td>
+                      <td className="py-3 px-4 text-right">
+                        <button
+                          onClick={() => handleModelChange(ev.modelType)}
+                          className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px]"
+                        >
+                          Select
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </section>
       </main>
+
+      {/* Footer */}
+      <footer className="border-t border-slate-800 py-6 text-center text-xs text-slate-500">
+        <p>PredictX Dashboard • Machine Learning Sales Forecasting</p>
+      </footer>
     </div>
   );
 }
 
-/**
- * App with routes:
- *  /          → main prediction UI
- *  /dashboard → animated dashboard (pie, top brand, etc.)
- */
 export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={<MainApp />} />
+        <Route path="/" element={<MainForecastingView />} />
         <Route path="/dashboard" element={<CarDashboard />} />
       </Routes>
     </BrowserRouter>
