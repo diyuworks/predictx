@@ -153,11 +153,9 @@ predictx/
 ├── docs/
 │   └── screenshots/                # Application screenshots
 │       ├── dashboard.png           # Populated dashboard view
-│       ├── dashboard-empty.png     # Initial state before data upload
 │       ├── forecast-chart.png      # Forecast chart with actuals and predictions
-│       ├── brand-analytics.png     # Brand market share donut chart
-│       ├── model-configuration.png # Model configuration and upload card
-│       └── model-results.png       # Metrics results panel
+│       ├── model-results.png       # Model benchmark leaderboard
+│       └── brand-analytics.png     # Brand market share donut chart
 ├── backend/                        # Optional Django REST API backend
 │   ├── api/
 │   │   ├── migrations/             # Database migrations
