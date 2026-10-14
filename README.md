@@ -30,6 +30,7 @@ PredictX takes a CSV of historical sales, benchmarks four time-series models wit
 - [Export and Reporting](#export-and-reporting)
 - [What I Built and What I Learned](#what-i-built-and-what-i-learned)
 - [Limitations and Design Notes](#limitations-and-design-notes)
+- [Credits](#credits)
 - [Author and License](#author-and-license)
 
 ---
@@ -304,6 +305,12 @@ Written down on purpose, so nobody has to guess what this project does and doesn
 - **One series per upload.** Rows sharing a date are summed into one daily total before forecasting; the `brand` column is used only for the Brand Analytics page.
 - **Demo datasets are synthetic**, generated for demonstration.
 - **Backend is optional** and not used by the hosted demo; it stores uploaded rows in SQLite and exposes `/api/upload-car-data/` and `/api/car-data/`.
+
+---
+
+## Credits
+
+- UI components and design tokens adapted from [shadcn/ui](https://ui.shadcn.com/) (MIT License), built on Radix UI and Tailwind CSS.
 
 ---
 
